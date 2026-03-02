@@ -1,0 +1,357 @@
+############################################################
+## Libraries
+############################################################
+library(factoextra)   # PCA visualization helpers (fviz_*)
+library(FactoMineR)   # Multivariate analysis utilities (not strictly required for prcomp)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+############################################################
+## Helper settings
+############################################################
+
+# Sample group order (controls legend + facet/split ordering)
+group_levels <- c("NI (mock)", "NI (BCG-IT)", "Im (Mock)", "Im (BCG-IT)")
+
+# Colors for each group (must match the order above)
+group_palette <- c("#FAEB92", "tomato", "royalblue", "#73C7C7")
+
+############################################################
+## PART 1 — PCA using Type II Interferon-related GO terms
+############################################################
+
+# Build a counts data.frame from your count matrix and keep gene names
+counts_df <- as.data.frame(count_matrix)
+counts_df$genes <- rownames(counts_df)
+
+# Extract compareCluster result and filter by adjusted p-value
+interfe_II <- cc_up@compareClusterResult
+interfe_II <- subset(interfe_II, p.adjust <= 0.05)
+
+# GO terms of interest (Type II IFN-related)
+terms_ifn2 <- c(
+  "response to type II interferon",
+  "cellular response to type II interferon",
+  "type II interferon-mediated signaling pathway",
+  "regulation of response to type II interferon",
+  "type II interferon production",
+  "regulation of type II interferon production",
+  "positive regulation of type II interferon production",
+  "regulation of type II interferon-mediated signaling pathway"
+)
+
+# Keep only selected terms
+interfe_II <- subset(interfe_II, Description %in% terms_ifn2)
+
+# Expand gene lists (geneID) into one gene per row
+interfe_II <- interfe_II %>% separate_rows(geneID, sep = "/")
+
+# Remove duplicated genes (keep each gene only once)
+interfe_II <- interfe_II[!duplicated(interfe_II$geneID), ]
+
+# Final gene list for PCA
+selected_genes <- interfe_II$geneID
+
+# Subset counts to the selected genes
+counts_sub <- subset(counts_df, genes %in% selected_genes)
+
+# Remove the "genes" column by name (more robust than using column index -21)
+counts_sub$genes <- NULL
+
+# Transpose to: rows = samples, columns = genes
+pca_input <- as.data.frame(t(counts_sub))
+
+# Remove rows with missing values (if any)
+pca_input <- na.omit(pca_input)
+
+# Run PCA (center/scale features)
+res.pca <- prcomp(pca_input, scale. = TRUE)
+
+# Build group factor in the correct order
+groups <- factor(mdata_rna$Condition, levels = group_levels)
+
+# PCA biplot
+d <- fviz_pca_biplot(
+  res.pca,
+  col.ind = groups,                 # color samples by condition
+  axes = c(1, 2),
+  geom = "point",
+  col.var = "black",                # variable arrows in black
+  alpha.var = 0.05,                 # make variable arrows nearly transparent
+  palette = group_palette,
+  addEllipses = TRUE,
+  ellipse.type = "confidence",
+  legend.title = "Groups: ",
+  repel = TRUE,
+  mean.point = TRUE,
+  select.var = list(contrib = 20),  # show top 20 contributing variables
+  labelsize = 6
+) +
+  theme(legend.position = "bottom") +
+  ggtitle("Type II Interferon-Related Genes") +
+  theme(
+    text = element_text(size = 25),
+    axis.text = element_text(size = 25),
+    plot.title = element_text(hjust = 0.5)   # center title
+  )
+
+print(d)
+
+# Add marginal densities by group (note: ggMarginal expects a ggplot object; this usually works with factoextra output)
+p2 <- ggExtra::ggMarginal(d, type = "density", groupFill = TRUE, groupColour = TRUE)
+
+png("II_interferon.png", width = 3000, height = 2500, units = "px", res = 300)
+print(p2)
+dev.off()
+
+############################################################
+## PART 2 — Dotplot for a curated IFN-related gene list
+############################################################
+
+# Curated gene list (Type II IFN-related)
+inter_genes_ifn <- c(
+  "Zyx", "Cd1d1", "Stx11", "Mefv", "Laptm5", "Sash3", "Stat1",
+  "Slc11a1", "Ifng", "Evl", "Gbp5", "Carmil2", "Sirpa", "Pycard",
+  "Itk", "Was", "Cd40lg", "Cd3e", "Gbp2b", "Irf8"
+)
+
+# Subset counts for these genes (optional export/inspection)
+counts_df <- as.data.frame(count_matrix)
+counts_df$genes <- rownames(counts_df)
+
+counts_inter_df <- subset(counts_df, genes %in% inter_genes_ifn)
+counts_inter_df$genes <- NULL
+
+# NOTE: This line in your original script would error because `genes` is not defined as an object:
+# colnames(genes)
+# I removed it. If you meant a DEGs data.frame called `genes`, keep using it below.
+
+# Subset your DEGs/results table (assumes object `genes` exists with columns: gene, condition, padj, log2FoldChange)
+degs_inter <- subset(genes, gene %in% inter_genes_ifn)
+
+# Build plotting metrics:
+# - padj_plot prevents -Inf when padj=0 or NA
+# - size_padj is used as point size
+df <- degs_inter %>%
+  mutate(
+    padj_plot = ifelse(is.na(padj) | padj <= 0, 1e-300, padj),
+    size_padj = -log10(padj_plot)
+  )
+
+# Order genes by the best (smallest) padj across conditions
+gene_order <- df %>%
+  group_by(gene) %>%
+  summarise(best_padj = min(padj_plot, na.rm = TRUE), .groups = "drop") %>%
+  arrange(best_padj) %>%
+  pull(gene)
+
+# Order conditions by mean log2FC (optional)
+cond_order <- df %>%
+  group_by(condition) %>%
+  summarise(mean_lfc = mean(log2FoldChange, na.rm = TRUE), .groups = "drop") %>%
+  arrange(mean_lfc) %>%
+  pull(condition)
+
+df <- df %>%
+  mutate(
+    gene = factor(gene, levels = gene_order),
+    condition = factor(condition, levels = rev(cond_order))  # reverse so top-to-bottom looks nice
+  )
+
+# Dotplot (size = significance, color = effect size)
+p_dot_ifn <- ggplot(df, aes(x = gene, y = condition)) +
+  geom_point(aes(size = size_padj, color = log2FoldChange), alpha = 0.95) +
+  scale_size_continuous(
+    name = expression(-log[10](padj)),
+    range = c(0.6, 8)
+  ) +
+  coord_flip() +
+  scale_color_gradient2(
+    low = "royalblue", mid = "grey80", high = "tomato",
+    midpoint = 0,
+    name = "log2FoldChange"
+  ) +
+  scale_x_discrete(position = "top") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(size = 20, angle = 90, vjust = 0.5, hjust = 0),
+    axis.text.y = element_text(size = 20),
+    legend.position = "right",
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 20)
+  )
+
+png("dotplot_genes_inter.png", width = 1500, height = 3500, units = "px", res = 300)
+print(p_dot_ifn)
+dev.off()
+
+############################################################
+## PART 3 — PCA using "Inflammatory response" selected GO terms
+############################################################
+
+# Extract compareCluster result and filter by adjusted p-value
+stress <- cc_up@compareClusterResult
+stress <- subset(stress, p.adjust <= 0.05)
+
+# NOTE: In your original script you overwrote `terms` twice and had a typo:
+# "esponse to hypoxia" -> "response to hypoxia"
+# Here I keep only the *final* list you used (inflammatory / STAT / NF-kB).
+
+terms_inflam <- c(
+  "regulation of inflammatory response",
+  "leukocyte activation involved in inflammatory response",
+  "cell surface receptor signaling pathway via STAT",
+  "canonical NF-kappaB signal transduction"
+)
+
+# Keep only selected terms
+stress <- subset(stress, Description %in% terms_inflam)
+
+# Expand gene lists
+stress <- stress %>% separate_rows(geneID, sep = "/")
+
+# Remove duplicated genes
+stress <- stress[!duplicated(stress$geneID), ]
+
+selected_genes <- stress$geneID
+
+# Subset counts to selected genes
+counts_df <- as.data.frame(count_matrix)
+counts_df$genes <- rownames(counts_df)
+
+counts_sub <- subset(counts_df, genes %in% selected_genes)
+counts_sub$genes <- NULL
+
+# Transpose to samples x genes
+pca_input <- as.data.frame(t(counts_sub))
+pca_input <- na.omit(pca_input)
+
+# PCA
+res.pca <- prcomp(pca_input, scale. = TRUE)
+
+# Groups
+groups <- factor(mdata_rna$Condition, levels = group_levels)
+
+# PCA biplot
+d_inflam <- fviz_pca_biplot(
+  res.pca,
+  col.ind = groups,
+  axes = c(1, 2),
+  geom = "point",
+  col.var = "black",
+  alpha.var = 0.05,
+  palette = group_palette,
+  addEllipses = TRUE,
+  ellipse.type = "confidence",
+  legend.title = "Groups: ",
+  repel = TRUE,
+  mean.point = TRUE,
+  select.var = list(contrib = 20),
+  labelsize = 6
+) +
+  theme(legend.position = "bottom") +
+  ggtitle("Inflammatory response") +
+  theme(
+    text = element_text(size = 25),
+    axis.text = element_text(size = 25),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(d_inflam)
+
+p2_inflam <- ggExtra::ggMarginal(d_inflam, type = "density", groupFill = TRUE, groupColour = TRUE)
+
+png("inflammatory_response.png", width = 3000, height = 2500, units = "px", res = 300)
+print(p2_inflam)
+dev.off()
+
+############################################################
+## PART 4 — Dotplot for hypoxia OR inflammatory gene sets (choose one)
+############################################################
+
+# ---- Hypoxia curated genes (example list) ----
+inter_genes_hypoxia <- c(
+  "Bambi", "Klhl22", "AK4", "Syk", "F10", "Peli1", "Nrros", "Eng", "Sorl1", "Smad6",
+  "Acvr1b", "Nckap1l", "Card11", "Fstl1", "Rps6ka", "Vsir", "Epas1", "Furin", "Acvrl1", "Ptpn1"
+)
+
+# ---- Inflammatory curated genes (example list) ----
+inter_genes_inflam <- c(
+  "Fyn", "Traf3", "Akna", "Ptprc", "Ccr5", "Il16", "Pycard", "Ncf1", "Adora2a", "Rassf2",
+  "Cd4", "Ctss", "Csf2rb2", "Csf1r", "Csf2rb", "Sirpa", "Stat4", "Tnfaip812", "Ptpn6", "Fcgr3"
+)
+
+# Choose which list to plot:
+inter_genes <- inter_genes_hypoxia
+# inter_genes <- inter_genes_inflam
+
+# Subset counts for export/inspection
+counts <- as.data.frame(count_matrix)
+counts$genes <- rownames(counts)
+
+counts_inter_df <- subset(counts, genes %in% inter_genes)
+counts_inter_df$genes <- NULL
+
+# Export selected genes counts (optional)
+openxlsx::write.xlsx(counts_inter_df, "hypoxia_nina.xlsx", rowNames = TRUE)
+
+# Use the genes actually present in the subset (robust)
+inter_genes <- rownames(counts_inter_df)
+
+# Subset DEGs/results table
+degs_inter <- subset(genes, gene %in% inter_genes)
+
+df <- degs_inter %>%
+  mutate(
+    padj_plot = ifelse(is.na(padj) | padj <= 0, 1e-300, padj),
+    size_padj = -log10(padj_plot)
+  )
+
+gene_order <- df %>%
+  group_by(gene) %>%
+  summarise(best_padj = min(padj_plot, na.rm = TRUE), .groups = "drop") %>%
+  arrange(best_padj) %>%
+  pull(gene)
+
+cond_order <- df %>%
+  group_by(condition) %>%
+  summarise(mean_lfc = mean(log2FoldChange, na.rm = TRUE), .groups = "drop") %>%
+  arrange(mean_lfc) %>%
+  pull(condition)
+
+df <- df %>%
+  mutate(
+    gene = factor(gene, levels = gene_order),
+    condition = factor(condition, levels = rev(cond_order))
+  )
+
+p_dot <- ggplot(df, aes(x = gene, y = condition)) +
+  geom_point(aes(size = size_padj, color = log2FoldChange), alpha = 0.95) +
+  scale_size_continuous(
+    name = expression(-log[10](padj)),
+    range = c(0.6, 8)
+  ) +
+  coord_flip() +
+  scale_color_gradient2(
+    low = "royalblue", mid = "grey80", high = "tomato",
+    midpoint = 0,
+    name = "log2FoldChange"
+  ) +
+  scale_x_discrete(position = "top") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(size = 20, angle = 90, vjust = 0.5, hjust = 0),
+    axis.text.y = element_text(size = 20),
+    legend.position = "right",
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 20)
+  )
+
+png("dotplot_genes_hypoxia.png", width = 1500, height = 3500, units = "px", res = 300)
+print(p_dot)
+dev.off()
