@@ -1,0 +1,156 @@
+# ============================
+# Load libraries
+# ============================
+{
+  library(dplyr)          # data manipulation
+  library(tidyr)          # tidying data (e.g., separate_rows)
+  library(network)        # network objects
+  library(GGally)         # ggplot2 extensions (some network helpers)
+  library(ggplot2)        # plotting
+  library(scales)         # scaling utilities
+  library(sna)            # social network analysis utilities
+  library(ggnet)          # network plotting with ggplot2
+  library(RColorBrewer)   # color palettes
+}
+
+# ============================
+# Read enrichment table and keep relevant columns
+# ============================
+
+# Read the enrichment results (Biological Process comparison, upregulated)
+data_enrich <- openxlsx::read.xlsx("BP_compare_enrichment_up.xlsx")
+
+# Keep only columns 2, 4, 10, and 13 (based on your file structure)
+data_enrich <- data_enrich[, c(2, 4, 10, 13)]
+
+# Rename columns to standard names
+colnames(data_enrich) <- c("Group", "Term", "P.value", "Genes")
+
+# ============================
+# Build the network data
+# ============================
+
+# (Optional) check column names
+colnames(data_enrich)
+
+# Copy to a working object
+dfnet <- data_enrich
+
+# Split the "Genes" column so each gene becomes a separate row
+# Genes are assumed to be separated by "/"
+dfnet <- dfnet %>%
+  separate_rows(Genes, sep = "/")
+
+# Remove duplicated Term-Gene edges (keep one of each)
+net_data <- dfnet %>%
+  distinct(Term, Genes, .keep_all = TRUE)
+
+# Create an undirected network using Term-Gene edges
+# Each row defines an edge between Term and Genes
+net <- network(net_data[, c("Term", "Genes")], directed = FALSE)
+
+# ============================
+# Add vertex attributes (Group) to color nodes
+# ============================
+
+# Create a lookup table mapping gene -> group
+# NOTE: Terms will not appear in this mapping and will become NA later
+vertex_color <- unique(dfnet[, c("Genes", "Group")])
+vertex_color <- setNames(vertex_color$Group, vertex_color$Genes)
+
+# Assign the "Group" attribute to each vertex by matching vertex names
+# Genes will get their comparison group; terms will become NA
+set.vertex.attribute(net, "Group", vertex_color[network.vertex.names(net)])
+
+# Check unique groups present in the input (useful for confirming spellings)
+unique_systems <- unique(dfnet$Group)
+
+# Define a custom color dictionary for the node groups
+# Includes a fallback "Term" group for pathway/term nodes
+df_color_dicio <- data.frame(
+  Group = c(
+    "NI (BCG-IT) vs NI (mock)",
+    "Im (BCG-IT) vs NI (BCG-IT)",
+    "Im (BCG-IT) vs NI (mock)",
+    "Term"
+  ),
+  color = c("#F6E7BC", "royalblue", "tomato", "grey")
+)
+
+# Create a named vector: names are groups, values are colors
+color_palette <- setNames(df_color_dicio$color, df_color_dicio$Group)
+
+# Extract current vertex "Group" attribute into a data.frame
+df_color <- data.frame(Group = get.vertex.attribute(net, "Group"))
+
+# Replace NA values (these are typically Term nodes) with "Term"
+df_color %>%
+  mutate(Group = ifelse(is.na(Group), "Term", Group)) -> df_color
+
+# Write the cleaned group back to the network object
+set.vertex.attribute(net, "Group", df_color$Group)
+
+# Inspect final group assignment per node
+print(df_color)
+
+# ============================
+# Prepare labels: label only Term nodes, not gene nodes
+# ============================
+
+# Collect all unique term names
+tfs <- unique(dfnet$Term)
+
+# Get all vertex names (both terms and genes)
+labs <- network.vertex.names(net)
+
+# Identify which vertices correspond to terms
+idx <- which(labs %in% tfs)
+
+# Hide labels for term nodes in `labs` (will be handled via label=c(tfs))
+# and keep gene labels for ggrepel (below). Then you blank terms here.
+labs[idx] <- ""
+
+# ============================
+# Plot the network
+# ============================
+
+p <- ggnet2(
+  net,
+  size = "degree",               # node size proportional to degree
+  label = c(tfs),                # labels (provided vector; terms targeted)
+  label.size = 4,                # term label size
+  mode = "kamadakawai",          # layout algorithm
+  repel = TRUE,                  # repel labels to reduce overlap
+  alpha = 0.9,                   # node transparency
+  size.legend.title = "Degree",  # legend title for size
+  size.legend.position = "bottom",
+  edge.color = "gray90",         # edge color
+  shape.legend = TRUE,
+  legend.size = 10,
+  color = "Group",               # color nodes by Group attribute
+  palette = color_palette        # apply the custom color palette
+) +
+  theme(legend.position = "right") +
+  # Add repelled text labels using the `labs` vector (genes only, terms blanked)
+  ggrepel::geom_text_repel(
+    aes(label = labs),
+    max.overlaps = Inf,
+    bg.color = "white",          # label background fill
+    bg.r = 0.10,                 # label background corner radius
+    size = 3,
+    min.segment.length = 2,
+    point.padding = 0
+  )
+
+# ============================
+# Save figure
+# ============================
+
+ggsave(
+  filename = "Network.png",
+  plot = p,
+  device = "png",
+  width = 15,     # inches
+  height = 10,    # inches
+  units = "in"
+)
